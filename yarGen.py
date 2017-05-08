@@ -19,7 +19,7 @@ import scandir
 import pefile
 import pickle
 import gzip
-from cStringIO import StringIO
+import urllib
 from collections import Counter
 from hashlib import sha256
 from naiveBayesClassifier import tokenizer
@@ -33,9 +33,27 @@ except Exception, e:
     print "[E] lxml not found - disabling PeStudio string check functionality"
     lxml_available = False
 
-RELEVANT_EXTENSIONS = [ ".asp", ".vbs", ".ps", ".ps1", ".tmp", ".bas", ".bat", ".cmd", ".com", ".cpl",
-                         ".crt", ".dll", ".exe", ".msc",".scr", ".sys", ".vb", ".vbe", ".vbs", ".wsc",
-                        ".wsf", ".wsh", ".input", ".war", ".jsp", ".php", ".asp", ".aspx", ".psd1", ".psm1", ".py" ]
+RELEVANT_EXTENSIONS = [".asp", ".vbs", ".ps", ".ps1", ".tmp", ".bas", ".bat", ".cmd", ".com", ".cpl",
+                       ".crt", ".dll", ".exe", ".msc", ".scr", ".sys", ".vb", ".vbe", ".vbs", ".wsc",
+                       ".wsf", ".wsh", ".input", ".war", ".jsp", ".php", ".asp", ".aspx", ".psd1", ".psm1", ".py"]
+
+REPO_URLS = {
+    'good-opcodes-part1.db': 'https://www.bsk-consulting.de/download/good-opcodes-part1.db',
+    'good-opcodes-part2.db': 'https://www.bsk-consulting.de/download/good-opcodes-part2.db',
+    'good-opcodes-part3.db': 'https://www.bsk-consulting.de/download/good-opcodes-part3.db',
+    'good-opcodes-part4.db': 'https://www.bsk-consulting.de/download/good-opcodes-part4.db',
+    'good-opcodes-part5.db': 'https://www.bsk-consulting.de/download/good-opcodes-part5.db',
+    'good-opcodes-part6.db': 'https://www.bsk-consulting.de/download/good-opcodes-part6.db',
+    'good-strings-part1.db': 'https://www.bsk-consulting.de/download/good-strings-part1.db',
+    'good-strings-part2.db': 'https://www.bsk-consulting.de/download/good-strings-part2.db',
+    'good-strings-part3.db': 'https://www.bsk-consulting.de/download/good-strings-part3.db',
+    'good-strings-part4.db': 'https://www.bsk-consulting.de/download/good-strings-part4.db',
+    'good-strings-part5.db': 'https://www.bsk-consulting.de/download/good-strings-part5.db',
+    'good-strings-part6.db': 'https://www.bsk-consulting.de/download/good-strings-part6.db',
+}
+
+PE_STRINGS_FILE = "./3rdparty/strings.xml"
+
 def get_abs_path(filename):
     return os.path.join(os.path.dirname(os.path.abspath(__file__)),filename)
 
@@ -260,9 +278,19 @@ def extract_opcodes(filePath):
         print "[-] Extracting OpCodes: %s" % filePath
 
         pe = pefile.PE(filePath)
+        name = ""
+        ep = pe.OPTIONAL_HEADER.AddressOfEntryPoint
+        pos = 0
+        for sec in pe.sections:
+            if (ep >= sec.VirtualAddress) and \
+                    (ep < (sec.VirtualAddress + sec.Misc_VirtualSize)):
+                name = sec.Name.replace('\x00', '')
+                break
+            else:
+                pos += 1
 
         for section in pe.sections:
-            if section.Name.rstrip("\x00") == '.text':
+            if section.Name.rstrip("\x00") == name:
                 text = section.get_data()
                 # Split text into subs
                 text_parts = re.split("[\x00]{3,}", text)
@@ -272,7 +300,7 @@ def extract_opcodes(filePath):
                         continue
                     opcodes.append(text_part[:16].encode('hex'))
 
-    except Exception,e:
+    except Exception, e:
         if args.debug:
             traceback.print_exc()
         pass
@@ -327,7 +355,8 @@ def sample_string_evaluation(string_stats, opcode_stats, file_info):
                 for fileName in string_stats[string]["files_basename"]:
                     string_occurrance_count = string_stats[string]["files_basename"][fileName]
                     total_count_basename = file_info[fileName]["count"]
-                    # print "string_occurance_count %s - total_count_basename %s" % ( string_occurance_count, total_count_basename )
+                    # print "string_occurance_count %s - total_count_basename %s" % ( string_occurance_count,
+                    # total_count_basename )
                     if string_occurrance_count == total_count_basename:
                         if fileName not in inverse_stats:
                             inverse_stats[fileName] = []
@@ -344,11 +373,13 @@ def sample_string_evaluation(string_stats, opcode_stats, file_info):
             # print sample_string_stats[string]["count"]
             if string_stats[string]["count"] > 1:
                 if args.debug:
-                    print "OVERLAP Count: %s\nString: \"%s\"%s" % ( string_stats[string]["count"], string, "\nFILE: ".join(string_stats[string]["files"]) )
+                    print "OVERLAP Count: %s\nString: \"%s\"%s" % (string_stats[string]["count"], string,
+                                                                   "\nFILE: ".join(string_stats[string]["files"]))
                 # Create a combination string from the file set that matches to that string
                 combi = ":".join(sorted(string_stats[string]["files"]))
                 # print "STRING: " + string
-                print "COMBI: " + combi
+                if args.debug:
+                    print "COMBI: " + combi
                 # If combination not yet known
                 if combi not in combinations:
                     combinations[combi] = {}
@@ -401,21 +432,37 @@ def sample_string_evaluation(string_stats, opcode_stats, file_info):
 
 def filter_opcode_set(opcode_set):
 
+    # Preferred Opcodes
+    pref_opcodes = [' 34 ', 'ff ff ff ']
+
     # Useful set
     useful_set = []
+    pref_set = []
 
     for opcode in opcode_set:
         if opcode in good_opcodes_db:
             continue
 
+        # Format the opcode
+        formatted_opcode = get_opcode_string(opcode)
+
+        # Preferred opcodes
+        set_in_pref = False
+        for pref in pref_opcodes:
+            if pref in formatted_opcode:
+                pref_set.append(formatted_opcode)
+                set_in_pref = True
+        if set_in_pref:
+            continue
+
         # Else add to useful set
         useful_set.append(get_opcode_string(opcode))
 
-        # OpCode max count reached
-        if len(useful_set) >= args.n:
-            break
+    # Preferred opcodes first
+    useful_set = pref_set + useful_set
 
-    return useful_set
+    # Only return the number of opcodes defined with the "-n" parameter
+    return useful_set[:int(args.n)]
 
 
 def filter_string_set(string_set):
@@ -508,10 +555,15 @@ def filter_string_set(string_set):
 
             # Certain strings add-ons ----------------------------------------------
             # Extensions - Drive
-            if re.search(r'([A-Za-z]:\\|\.exe|\.pdb|\.scr|\.log|\.cfg|\.txt|\.dat|\.msi|\.com|\.bat|\.dll|\.pdb|\.vbs|\.tmp|\.sys)', string, re.IGNORECASE):
+            if re.search(r'[A-Za-z]:\\', string, re.IGNORECASE):
+                localStringScores[string] += 2
+            # Relevant file extensions
+            if re.search(r'(\.exe|\.pdb|\.scr|\.log|\.cfg|\.txt|\.dat|\.msi|\.com|\.bat|\.dll|\.pdb|\.vbs|'
+                         r'\.tmp|\.sys|\.ps1)', string, re.IGNORECASE):
                 localStringScores[string] += 4
             # System keywords
-            if re.search(r'(cmd.exe|system32|users|Documents and|SystemRoot|Grant|hello|password|process|log)', string, re.IGNORECASE):
+            if re.search(r'(cmd.exe|system32|users|Documents and|SystemRoot|Grant|hello|password|process|log)',
+                         string, re.IGNORECASE):
                 localStringScores[string] += 5
             # Protocol Keywords
             if re.search(r'(ftp|irc|smtp|command|GET|POST|Agent|tor2web|HEAD)', string, re.IGNORECASE):
@@ -525,17 +577,20 @@ def filter_string_set(string_set):
             # Temp and Recycler
             if re.search(r'(TEMP|Temporary|Appdata|Recycler)', string, re.IGNORECASE):
                 localStringScores[string] += 4
-            # malicious keywords - hacktools
-            if re.search(r'(scan|sniff|poison|intercept|fake|spoof|sweep|dump|flood|inject|forward|scan|vulnerable|credentials|creds|coded|p0c|Content|host)', string, re.IGNORECASE):
+            # Malicious keywords - hacktools
+            if re.search(r'(scan|sniff|poison|intercept|fake|spoof|sweep|dump|flood|inject|forward|scan|vulnerable|'
+                         r'credentials|creds|coded|p0c|Content|host)', string, re.IGNORECASE):
                 localStringScores[string] += 5
-            # network keywords
-            if re.search(r'(address|port|listen|remote|local|process|service|mutex|pipe|frame|key|lookup|connection)', string, re.IGNORECASE):
+            # Network keywords
+            if re.search(r'(address|port|listen|remote|local|process|service|mutex|pipe|frame|key|lookup|connection)',
+                         string, re.IGNORECASE):
                 localStringScores[string] += 3
             # Drive
             if re.search(r'([C-Zc-z]:\\)', string, re.IGNORECASE):
                 localStringScores[string] += 4
             # IP
-            if re.search(r'\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b', string, re.IGNORECASE): # IP Address
+            if re.search(r'\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b',
+                         string, re.IGNORECASE): # IP Address
                 localStringScores[string] += 5
             # Copyright Owner
             if re.search(r'(coded | c0d3d |cr3w\b|Coded by |codedby)', string, re.IGNORECASE):
@@ -568,7 +623,7 @@ def filter_string_set(string_set):
             if re.search(r'([a-zA-Z]:|^|%)\\[A-Za-z]{4,30}\\', string):
                 localStringScores[string] += 4
             # Executable - not in directory
-            if re.search(r'^[^\\]+\.(exe|com|scr|bat)$', string, re.IGNORECASE):
+            if re.search(r'^[^\\]+\.(exe|com|scr|bat|sys)$', string, re.IGNORECASE):
                 localStringScores[string] += 4
             # Date placeholders
             if re.search(r'(yyyy|hh:mm|dd/mm|mm/dd|%s:%s:)', string, re.IGNORECASE):
@@ -577,13 +632,16 @@ def filter_string_set(string_set):
             if re.search(r'[^A-Za-z](%s|%d|%i|%02d|%04d|%2d|%3s)[^A-Za-z]', string, re.IGNORECASE):
                 localStringScores[string] += 3
             # String parts from file system elements
-            if re.search(r'(cmd|com|pipe|tmp|temp|recycle|bin|secret|private|AppData|driver|config)', string, re.IGNORECASE):
+            if re.search(r'(cmd|com|pipe|tmp|temp|recycle|bin|secret|private|AppData|driver|config)', string,
+                         re.IGNORECASE):
                 localStringScores[string] += 3
             # Programming
-            if re.search(r'(execute|run|system|shell|root|cimv2|login|exec|stdin|read|process|netuse|script|share)', string, re.IGNORECASE):
+            if re.search(r'(execute|run|system|shell|root|cimv2|login|exec|stdin|read|process|netuse|script|share)',
+                         string, re.IGNORECASE):
                 localStringScores[string] += 3
             # Credentials
-            if re.search(r'(user|pass|login|logon|token|cookie|creds|hash|ticket|NTLM|LMHASH|kerberos|spnego|session|identif|account|login|auth|privilege)', string, re.IGNORECASE):
+            if re.search(r'(user|pass|login|logon|token|cookie|creds|hash|ticket|NTLM|LMHASH|kerberos|spnego|session|'
+                         r'identif|account|login|auth|privilege)', string, re.IGNORECASE):
                 localStringScores[string] += 3
             # Malware
             if re.search(r'(\.[a-z]/[^/]+\.txt|)', string, re.IGNORECASE):
@@ -592,13 +650,18 @@ def filter_string_set(string_set):
             if re.search(r'%[A-Z_]+%', string, re.IGNORECASE):
                 localStringScores[string] += 4
             # RATs / Malware
-            if re.search(r'(spy|logger|dark|cryptor|RAT\b|eye|comet|evil|xtreme|poison|meterpreter|metasploit)', string, re.IGNORECASE):
+            if re.search(r'(spy|logger|dark|cryptor|RAT\b|eye|comet|evil|xtreme|poison|meterpreter|metasploit)',
+                         string, re.IGNORECASE):
                 localStringScores[string] += 5
             # Missed user profiles
-            if re.search(r'[\\](users|profiles|username|benutzer|Documents and Settings|Utilisateurs|Utenti|Usuários)[\\]', string, re.IGNORECASE):
+            if re.search(r'[\\](users|profiles|username|benutzer|Documents and Settings|Utilisateurs|Utenti|'
+                         r'UsuÃ¡rios)[\\]', string, re.IGNORECASE):
                 localStringScores[string] += 3
             # Strings: Words ending with numbers
             if re.search(r'^[A-Z][a-z]+[0-9]+$', string, re.IGNORECASE):
+                localStringScores[string] += 1
+            # Spying
+            if re.search(r'(implant)', string, re.IGNORECASE):
                 localStringScores[string] += 1
             # Program Path - not Programs or Windows
             if re.search(r'^[Cc]:\\\\[^PW]', string):
@@ -621,8 +684,15 @@ def filter_string_set(string_set):
             # Base64
             if re.search(r'^(?:[A-Za-z0-9+/]{4}){30,}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$', string):
                 localStringScores[string] += 4
+            # Base64 Executables
+            if re.search(r'(TVqQAAMAAAAEAAAA//8AALgAAAA|TVpQAAIAAAAEAA8A//8AALgAAAA|TVqAAAEAAAAEABAAAAAAAAAAAAA|'
+                         r'TVoAAAAAAAAAAAAAAAAAAAAAAAA|TVpTAQEAAAAEAAAA//8AALgAAAA)', string):
+                localStringScores[string] += 5
             # Malicious intent
-            if re.search(r'(loader|cmdline|ntlmhash|lmhash|drop|infect|encrypt|exec|elevat|dump|target|victim|override|traverse|mutex|pawnde|exploited|shellcode|injected|spoofed)', string, re.IGNORECASE):
+            if re.search(r'(loader|cmdline|ntlmhash|lmhash|infect|encrypt|exec|elevat|dump|target|victim|override|'
+                         r'traverse|mutex|pawnde|exploited|shellcode|injected|spoofed|dllinjec|exeinj|reflective|'
+                         r'payload|inject|back conn)',
+                         string, re.IGNORECASE):
                 localStringScores[string] += 5
             # Privileges
             if re.search(r'(administrator|highest|system|debug|dbg|admin|adm|root) privilege', string, re.IGNORECASE):
@@ -642,6 +712,47 @@ def filter_string_set(string_set):
             # Special - Malware related strings
             if re.search(r'(Management Support Team1|/c rundll32|DTOPTOOLZ Co.|net start|Exec|taskkill)', string):
                 localStringScores[string] += 4
+            # Powershell
+            if re.search(r'(-exec bypass|IEX |Invoke-Expression|Net.Webclient|Invoke[A-Z]|Net.WebClient|-w hidden |'
+                         r'-encodedcommand| -nop |MemoryLoadLibrary|FromBase64String)', string):
+                localStringScores[string] += 4
+            # Signing Certificates
+            if re.search(r'( Inc | Co.|  Ltd.,| LLC| Limited)', string):
+                localStringScores[string] += 2
+            # Privilege escalation
+            if re.search(r'(sysprep|cryptbase|secur32)', string, re.IGNORECASE):
+                localStringScores[string] += 2
+            # Webshells
+            if re.search(r'(isset\($post\[|isset\($get\[|eval\(Request)', string, re.IGNORECASE):
+                localStringScores[string] += 2
+            # Suspicious words 1
+            if re.search(r'(impersonate|drop|upload|download|execute|shell|\bcmd\b|decode|rot13|decrypt)', string, re.IGNORECASE):
+                localStringScores[string] += 2
+            # Suspicious words 1
+            if re.search(r'([+] |[-] |[*] |injecting|exploit|dumped|dumping|scanning|scanned|elevation|'
+                         r'elevated|payload|vulnerable|payload|reverse connect|bind shell|reverse shell| dump | '
+                         r'back connect |privesc|privilege escalat|debug privilege| inject |interactive shell|'
+                         r'shell commands| spawning |] target |] Transmi|] Connect|] connect|] Dump|] command |'
+                         r'] token|] Token |] Firing | hashes | etc/passwd| SAM | NTML|unsupported target|'
+                         r'race condition|Token system |LoaderConfig| add user |ile upload |ile download |'
+                         r'Attaching to |ser has been successfully added|target system |LSA Secrets|DefaultPassword|'
+                         r'Password: |loading dll|.Execute\(|Shellcode)', string, re.IGNORECASE):
+                localStringScores[string] += 4
+            # Usage
+            if re.search(r'(isset\($post\[|isset\($get\[)', string, re.IGNORECASE):
+                localStringScores[string] += 2
+            # Hash
+            if re.search(r'([a-f0-9]{32}|[a-f0-9]{40}|[a-f0-9]{64})', string, re.IGNORECASE):
+                localStringScores[string] += 2
+            # Persistence
+            if re.search(r'(sc.exe |schtasks|at \\\\|at [0-9]{2}:[0-9]{2})', string, re.IGNORECASE):
+                localStringScores[string] += 3
+            # Unix/Linux
+            if re.search(r'(;chmod |; chmod |sh -c|/dev/tcp/|/bin/telnet|selinux| shell| cp /bin/sh )', string, re.IGNORECASE):
+                localStringScores[string] += 3
+            # Attack
+            if re.search(r'(attacker|brute force|bruteforce|connecting back|EXHAUSTIVE|exhaustion| spawn| evil| elevated)', string, re.IGNORECASE):
+                localStringScores[string] += 3
 
             # Binarly Lookup
             if binarly_active and localStringScores[string] > 0:
@@ -770,10 +881,11 @@ def generate_rules(file_strings, file_opcodes, super_rules, file_info, inverse_s
 
     # General Info
     general_info = "/*\n"
-    general_info += "\tYara Rule Set\n"
-    general_info += "\tAuthor: {0}\n".format(args.a)
-    general_info += "\tDate: {0}\n".format(get_timestamp_basic())
-    general_info += "\tIdentifier: {0}\n".format(os.path.basename(args.m))
+    general_info += "   Yara Rule Set\n"
+    general_info += "   Author: {0}\n".format(args.a)
+    general_info += "   Date: {0}\n".format(get_timestamp_basic())
+    general_info += "   Identifier: {0}\n".format(os.path.basename(args.m))
+    general_info += "   Reference: {0}\n".format(args.r)
     general_info += "*/\n\n"
 
     fh.write(general_info)
@@ -788,8 +900,8 @@ def generate_rules(file_strings, file_opcodes, super_rules, file_info, inverse_s
             global_rule = "/* Global Rule -------------------------------------------------------------- */\n"
             global_rule += "/* Will be evaluated first, speeds up scanning process, remove at will */\n\n"
             global_rule += "global private rule gen_characteristics {\n"
-            global_rule += "\tcondition:\n"
-            global_rule += "\t\t{0}\n".format(condition)
+            global_rule += "   condition:\n"
+            global_rule += "      {0}\n".format(condition)
             global_rule += "}\n\n"
 
             # Write rule
@@ -818,11 +930,11 @@ def generate_rules(file_strings, file_opcodes, super_rules, file_info, inverse_s
             file_strings[filePath] = []
             file_strings[filePath] = filter_string_set(string_set)
 
-            print "[-] Filtering opcode set for %s ..." % filePath
-
             # Replace the original string set with the filtered one
             if filePath not in file_opcodes:
                 file_opcodes[filePath] = []
+            else:
+                print "[-] Filtering opcode set for %s ..." % filePath
             opcode_set = file_opcodes[filePath]
             file_opcodes[filePath] = []
             file_opcodes[filePath] = filter_opcode_set(opcode_set)
@@ -869,13 +981,13 @@ def generate_rules(file_strings, file_opcodes, super_rules, file_info, inverse_s
                 rule += "rule %s {\n" % cleanedName
 
                 # Meta data -----------------------------------------------
-                rule += "\tmeta:\n"
-                rule += "\t\tdescription = \"%s - file %s\"\n" % ( args.p, file )
-                rule += "\t\tauthor = \"%s\"\n" % args.a
-                rule += "\t\treference = \"%s\"\n" % args.r
-                rule += "\t\tdate = \"%s\"\n" % get_timestamp_basic()
-                rule += "\t\thash1 = \"%s\"\n" % file_info[filePath]["hash"]
-                rule += "\tstrings:\n"
+                rule += "   meta:\n"
+                rule += "      description = \"%s - file %s\"\n" % ( args.p, file )
+                rule += "      author = \"%s\"\n" % args.a
+                rule += "      reference = \"%s\"\n" % args.r
+                rule += "      date = \"%s\"\n" % get_timestamp_basic()
+                rule += "      hash1 = \"%s\"\n" % file_info[filePath]["hash"]
+                rule += "   strings:\n"
 
                 # Get the strings -----------------------------------------
                 # Rule String generation
@@ -907,7 +1019,7 @@ def generate_rules(file_strings, file_opcodes, super_rules, file_info, inverse_s
                 elif not low_scoring_strings > 0 and high_scoring_strings > 0:
                     cond_combined = "{0}".format(cond_hs)
                 if opcodes_included:
-                    cond_op = " and 1 of ($op*)"
+                    cond_op = " and all of ($op*)"
                 # Condition
                 condition = "( {0} ){1}".format(cond_combined, cond_op)
 
@@ -923,8 +1035,8 @@ def generate_rules(file_strings, file_opcodes, super_rules, file_info, inverse_s
                 # In memory detection base condition
                 condition = "( {0} ) or ( all of them )".format(condition)
 
-                rule += "\tcondition:\n"
-                rule += "\t\t%s\n" % condition
+                rule += "   condition:\n"
+                rule += "      %s\n" % condition
                 rule += "}\n\n"
 
                 # print rule
@@ -985,16 +1097,16 @@ def generate_rules(file_strings, file_opcodes, super_rules, file_info, inverse_s
 
                 # Print rule title
                 rule += "rule %s {\n" % rule_name
-                rule += "\tmeta:\n"
-                rule += "\t\tdescription = \"%s - from files %s\"\n" % ( args.p, file_listing )
-                rule += "\t\tauthor = \"%s\"\n" % args.a
-                rule += "\t\treference = \"%s\"\n" % args.r
-                rule += "\t\tdate = \"%s\"\n" % get_timestamp_basic()
-                rule += "\t\tsuper_rule = 1\n"
+                rule += "   meta:\n"
+                rule += "      description = \"%s - from files %s\"\n" % ( args.p, file_listing )
+                rule += "      author = \"%s\"\n" % args.a
+                rule += "      reference = \"%s\"\n" % args.r
+                rule += "      date = \"%s\"\n" % get_timestamp_basic()
+                rule += "      super_rule = 1\n"
                 for i, filePath in enumerate(super_rule["files"]):
-                    rule += "\t\thash%s = \"%s\"\n" % (str(i+1), file_info[filePath]["hash"])
+                    rule += "      hash%s = \"%s\"\n" % (str(i+1), file_info[filePath]["hash"])
 
-                rule += "\tstrings:\n"
+                rule += "   strings:\n"
 
                 # Adding the strings
                 if file_opcodes.get(filePath) is None:
@@ -1029,7 +1141,7 @@ def generate_rules(file_strings, file_opcodes, super_rules, file_info, inverse_s
                 elif not low_scoring_strings > 0 and high_scoring_strings > 0:
                     cond_combined = "{0}".format(cond_hs)
                 if opcodes_included:
-                    cond_op = " and 1 of ($op*)"
+                    cond_op = " and all of ($op*)"
                 # Condition
                 condition = "( {0} ){1}".format(cond_combined, cond_op)
 
@@ -1044,9 +1156,9 @@ def generate_rules(file_strings, file_opcodes, super_rules, file_info, inverse_s
                 # In memory detection base condition
                 condition = "( {0} ) or ( all of them )".format(condition)
 
-                rule += "\tcondition:\n"
-                rule += "\t\t{0}\n".format(condition)
-                rule += "}\n"
+                rule += "   condition:\n"
+                rule += "      {0}\n".format(condition)
+                rule += "}\n\n"
 
                 # print rule
                 # Add to rules string
@@ -1109,15 +1221,15 @@ def generate_rules(file_strings, file_opcodes, super_rules, file_info, inverse_s
                 rule += "rule %s {\n" % cleanedName
 
                 # Meta data -----------------------------------------------
-                rule += "\tmeta:\n"
-                rule += "\t\tdescription = \"%s for anomaly detection - file %s\"\n" % ( args.p, fileName )
-                rule += "\t\tauthor = \"%s\"\n" % args.a
-                rule += "\t\treference = \"%s\"\n" % args.r
-                rule += "\t\tdate = \"%s\"\n" % get_timestamp_basic()
+                rule += "   meta:\n"
+                rule += "      description = \"%s for anomaly detection - file %s\"\n" % ( args.p, fileName )
+                rule += "      author = \"%s\"\n" % args.a
+                rule += "      reference = \"%s\"\n" % args.r
+                rule += "      date = \"%s\"\n" % get_timestamp_basic()
                 for i, hash in enumerate(file_info[fileName]["hashes"]):
-                    rule += "\t\thash%s = \"%s\"\n" % (str(i+1), hash)
+                    rule += "      hash%s = \"%s\"\n" % (str(i+1), hash)
 
-                rule += "\tstrings:\n"
+                rule += "   strings:\n"
 
                 # Get the strings -----------------------------------------
                 # Rule String generation
@@ -1133,8 +1245,8 @@ def generate_rules(file_strings, file_opcodes, super_rules, file_info, inverse_s
                     folderNames += "$/ )"
                 condition = "filename == \"%s\" %s and not ( all of them )" % (fileName, folderNames)
 
-                rule += "\tcondition:\n"
-                rule += "\t\t%s\n" % condition
+                rule += "   condition:\n"
+                rule += "      %s\n" % condition
                 rule += "}\n\n"
 
                 # print rule
@@ -1192,12 +1304,13 @@ def get_rule_strings(string_elements, opcode_elements):
             if args.score:
                 binarly_score = " "
                 if args.binarly:
-                    cache_key = "%sascii" % string
+                    string_type = "ascii"
+                    string_lookup = string
                     if string[:8] == "UTF16LE:":
-                        cache_key = "%swide" % string[8:]
-                    # print cache_key
-                    if cache_key in binarly_cache:
-                        binarly_score = " (binarly: %s) " % binarly_cache[cache_key]
+                        string_type = "wide"
+                        # print "removed UTF16LE from %s" % string
+                        string_lookup = string[8:]
+                    binarly_score = " (binarly: t: %s m: %s p: %s c: %s s: %s) " % get_binarly_data(string_lookup, string_type)
                 score_comment += " /* score: '%.2f'%s*/" % (stringScores[string], binarly_score)
         else:
             print "NO SCORE: %s" % string
@@ -1226,9 +1339,9 @@ def get_rule_strings(string_elements, opcode_elements):
         # No compose the rule line
         if float(stringScores[initial_string]) > score_highly_specific:
             high_scoring_strings += 1
-            rule_strings += "\t\t$x%s = \"%s\"%s%s%s%s%s%s%s\n" % (str(i+1), string, fullword, enc, base64comment, reversedComment, pestudio_comment, score_comment, goodware_comment )
+            rule_strings += "      $x%s = \"%s\"%s%s%s%s%s%s%s\n" % (str(i+1), string, fullword, enc, base64comment, reversedComment, pestudio_comment, score_comment, goodware_comment )
         else:
-            rule_strings += "\t\t$s%s = \"%s\"%s%s%s%s%s%s%s\n" % (str(i+1), string, fullword, enc, base64comment, reversedComment, pestudio_comment, score_comment, goodware_comment )
+            rule_strings += "      $s%s = \"%s\"%s%s%s%s%s%s%s\n" % (str(i+1), string, fullword, enc, base64comment, reversedComment, pestudio_comment, score_comment, goodware_comment )
 
         # If too many string definitions found - cut it at the
         # count defined via command line param -rc
@@ -1240,12 +1353,15 @@ def get_rule_strings(string_elements, opcode_elements):
     # If too few strings - add opcodes
     # Adding the strings --------------------------------------
     opcodes_included = False
-    if string_rule_count < args.rc:
-        if len(opcode_elements) > 0:
-            rule_strings += "\n"
-            for i, opcode in enumerate(opcode_elements):
-                rule_strings += "\t\t$op%s = { %s } /* Opcode */\n" % (str(i), opcode)
-                opcodes_included = True
+    if len(opcode_elements) > 0:
+        rule_strings += "\n"
+        rule_strings += "      /* Recommendation - verify the opcodes on Binarly : http://www.binar.ly */\n"
+        rule_strings += "      /* Test each of them in the search field & reduce length until it generates matches */\n"
+        for i, opcode in enumerate(opcode_elements):
+            rule_strings += "      $op%s = { %s }\n" % (str(i), opcode)
+            opcodes_included = True
+    else:
+        print "[-] Not enough unique opcodes found to include them"
 
     return rule_strings, opcodes_included, string_rule_count, high_scoring_strings
 
@@ -1253,7 +1369,7 @@ def get_rule_strings(string_elements, opcode_elements):
 def initialize_pestudio_strings():
     pestudio_strings = {}
 
-    tree = etree.parse(get_abs_path('strings.xml'))
+    tree = etree.parse(get_abs_path(PE_STRINGS_FILE))
 
     pestudio_strings["strings"] = tree.findall(".//string")
     pestudio_strings["av"] = tree.findall(".//av")
@@ -1301,6 +1417,39 @@ def get_pestudio_score(string):
     return 0, ""
 
 
+def get_binarly_data(string, string_type, paranoid=False):
+    """
+    Performs a binarly lookup and return the info
+    :param string: string to lookup
+    :param string_type: ascii or wide
+    :param paranoid: use paranoid/exact lookup in Binarly service
+    :return: total, malware, pua, clean, suspicious
+    """
+    r_count, r_mal, r_pus, r_clean, r_susp = 0, 0, 0, 0, 0
+
+    # New API SDKv1 Search
+    if string_type != "wide":
+        result = binarly.search(ascii_pattern(string.decode('string-escape')), limit=0, exact=paranoid)
+    else:
+        result = binarly.search(wide_pattern(string.decode('string-escape')), limit=0, exact=paranoid)
+
+    # Results
+    try:
+        if result['stats']['total_count'] > 0:
+            # Counts
+            r_count     = float(result['stats']['total_count'])
+            r_mal       = float(result['stats']['malware_count'])
+            r_pus       = float(result['stats']['pua_count'])
+            r_clean     = float(result['stats']['clean_count'])
+            r_susp      = float(result['stats']['suspicious_count'])
+
+    except Exception, e:
+        if args.debug:
+            traceback.print_exc()
+
+    return r_count, r_mal, r_pus, r_clean, r_susp
+
+
 def get_binarly_score(string, string_type, paranoid=False):
     """
     Performs a binarly lookup and generates a score from the results
@@ -1332,6 +1481,8 @@ def get_binarly_score(string, string_type, paranoid=False):
         result = binarly.search(ascii_pattern(string.decode('string-escape')), limit=0, exact=paranoid)
     else:
         result = binarly.search(wide_pattern(string.decode('string-escape')), limit=0, exact=paranoid)
+
+    print result
 
     # increment binarly request counter
     binarly_count += 1
@@ -1492,6 +1643,33 @@ def init_binarly_apikey(api_key_file):
 
     return api_key
 
+def update_databases():
+
+    # Preparations
+    try:
+        dbDir = './dbs/'
+        if not os.path.exists(dbDir):
+            os.makedirs(dbDir)
+    except Exception, e:
+        if args.debug:
+            traceback.print_exc()
+        print "Error while creating the database directory ./dbs"
+        sys.exit(1)
+
+    # Downloading current repository
+    try:
+        for filename, repo_url in REPO_URLS.iteritems():
+            print "Downloading %s from %s ..." % (filename, repo_url)
+            fileDownloader = urllib.URLopener()
+            fileDownloader.retrieve(repo_url, "./dbs/%s" % filename)
+    except Exception, e:
+        if args.debug:
+            traceback.print_exc()
+        print "Error while downloading the database file - check your Internet connection"
+        print "Alterntive download link: https://drive.google.com/drive/folders/0B2S_IOa0MiOHS0xmekR6VWRhZ28"
+        print "Download the files and place them into the ./dbs/ folder"
+        sys.exit(1)
+
 
 def print_welcome():
     print "###############################################################################"
@@ -1504,8 +1682,8 @@ def print_welcome():
     print "   "
     print "   Yara Rule Generator"
     print "   by Florian Roth"
-    print "   August 2016"
-    print "   Version 0.16.1"
+    print "   February 2017"
+    print "   Version 0.17.1"
     print "   "
     print "###############################################################################"
 
@@ -1517,41 +1695,66 @@ if __name__ == '__main__':
 
     group_creation = parser.add_argument_group('Rule Creation')
     group_creation.add_argument('-m', help='Path to scan for malware')
-    group_creation.add_argument('-l', help='Minimum string length to consider (default=8)', metavar='min-size', default=8)
+    group_creation.add_argument('-l', help='Minimum string length to consider (default=8)', metavar='min-size',
+                                default=8)
     group_creation.add_argument('-z', help='Minimum score to consider (default=5)', metavar='min-score', default=5)
-    group_creation.add_argument('-x', help='Score required to set string as \'highly specific string\' (default: 30, +10 with binarly)', metavar='high-scoring', default=30)
+    group_creation.add_argument('-x', help='Score required to set string as \'highly specific string\' (default: 30, '
+                                           '+10 with binarly)', metavar='high-scoring', default=30)
     group_creation.add_argument('-s', help='Maximum length to consider (default=128)', metavar='max-size', default=128)
-    group_creation.add_argument('-rc', help='Maximum number of strings per rule (default=20, intelligent filtering will be applied)', metavar='maxstrings', default=20)
-    group_creation.add_argument('--excludegood', help='Force the exclude all goodware strings', action='store_true', default=False)
+    group_creation.add_argument('-rc', help='Maximum number of strings per rule (default=20, intelligent filtering '
+                                            'will be applied)', metavar='maxstrings', default=20)
+    group_creation.add_argument('--excludegood', help='Force the exclude all goodware strings', action='store_true',
+                                default=False)
 
     group_output = parser.add_argument_group('Rule Output')
     group_output.add_argument('-o', help='Output rule file', metavar='output_rule_file', default='yargen_rules.yar')
     group_output.add_argument('-a', help='Author Name', metavar='author', default='YarGen Rule Generator')
     group_output.add_argument('-r', help='Reference', metavar='ref', default='not set')
-    group_output.add_argument('-p', help='Prefix for the rule description', metavar='prefix', default='Auto-generated rule')    
-    group_output.add_argument('--score', help='Show the string scores as comments in the rules', action='store_true', default=False)
-    group_output.add_argument('--nosimple', help='Skip simple rule creation for files included in super rules', action='store_true', default=False)
-    group_output.add_argument('--nomagic', help='Don\'t include the magic header condition statement', action='store_true', default=False)
-    group_output.add_argument('--nofilesize', help='Don\'t include the filesize condition statement', action='store_true', default=False)
-    group_output.add_argument('-fm', help='Multiplier for the maximum \'filesize\' condition value (default: 3)', default=3)
-    group_output.add_argument('--globalrule', help='Create global rules (improved rule set speed)', action='store_true', default=False)
-    group_output.add_argument('--nosuper', action='store_true', default=False, help='Don\'t try to create super rules that match against various files')
+    group_output.add_argument('-p', help='Prefix for the rule description', metavar='prefix',
+                              default='Auto-generated rule')
+    group_output.add_argument('--score', help='Show the string scores as comments in the rules', action='store_true',
+                              default=False)
+    group_output.add_argument('--nosimple', help='Skip simple rule creation for files included in super rules',
+                              action='store_true', default=False)
+    group_output.add_argument('--nomagic', help='Don\'t include the magic header condition statement',
+                              action='store_true', default=False)
+    group_output.add_argument('--nofilesize', help='Don\'t include the filesize condition statement',
+                              action='store_true', default=False)
+    group_output.add_argument('-fm', help='Multiplier for the maximum \'filesize\' condition value (default: 3)',
+                              default=3)
+    group_output.add_argument('--globalrule', help='Create global rules (improved rule set speed)',
+                              action='store_true', default=False)
+    group_output.add_argument('--nosuper', action='store_true', default=False, help='Don\'t try to create super rules '
+                                                                                    'that match against various files')
     
     group_db = parser.add_argument_group('Database Operations')
+    group_db.add_argument('--update', action='store_true', default=False, help='Update the local strings and opcodes '
+                                                                               'dbs from the online repository '
+                                                                               '(Google Drive)')
     group_db.add_argument('-g', help='Path to scan for goodware (dont use the database shipped with yaraGen)')
-    group_db.add_argument('-u', action='store_true', default=False, help='Update local goodware database (use with -g)')
-    group_db.add_argument('-c', action='store_true', default=False, help='Create new local goodware database (use with -g)')
+    group_db.add_argument('-u', action='store_true', default=False, help='Update local standard goodware database with '
+                                                                         'a new analysis result (used with -g)')
+    group_db.add_argument('-c', action='store_true', default=False, help='Create new local goodware database '
+                                                                         '(use with -g and optionally -i "identifier")')
+    group_db.add_argument('-i', default="", help='Specify an identifier for the newly created databases '
+                                                 '(good-strings-identifier.db, good-opcodes-identifier.db)')
 
     group_general = parser.add_argument_group('General Options')    
     group_general.add_argument('--nr', action='store_true', default=False, help='Do not recursively scan directories')
-    group_general.add_argument('--oe', action='store_true', default=False, help='Only scan executable extensions EXE, DLL, ASP, JSP, PHP, BIN, INFECTED')
-    group_general.add_argument('-fs', help='Max file size in MB to analyze (default=10)', metavar='size-in-MB', default=10)
+    group_general.add_argument('--oe', action='store_true', default=False, help='Only scan executable extensions EXE, '
+                                                                                'DLL, ASP, JSP, PHP, BIN, INFECTED')
+    group_general.add_argument('-fs', help='Max file size in MB to analyze (default=10)', metavar='size-in-MB',
+                               default=10)
     group_general.add_argument('--debug', action='store_true', default=False, help='Debug output')
 
     group_opcode= parser.add_argument_group('Other Features')
-    group_opcode.add_argument('--opcodes', action='store_true', default=False, help='Do use the OpCode feature (use this if not enough high scoring strings can be found)')
-    group_opcode.add_argument('-n', help='Number of opcodes to add if not enough high scoring string could be found (default=3)', metavar='opcode-num', default=3)
-    group_opcode.add_argument('--binarly', action='store_true', default=False, help='Use binarly to lookup string statistics')
+    group_opcode.add_argument('--opcodes', action='store_true', default=False, help='Do use the OpCode feature '
+                                                                                    '(use this if not enough high '
+                                                                                    'scoring strings can be found)')
+    group_opcode.add_argument('-n', help='Number of opcodes to add if not enough high scoring string could be found '
+                                         '(default=3)', metavar='opcode-num', default=3)
+    group_opcode.add_argument('--binarly', action='store_true', default=False, help='Use binarly to lookup string '
+                                                                                    'statistics')
 
     group_inverse = parser.add_argument_group('Inverse Mode (unstable)')
     group_inverse.add_argument('--inverse', help=argparse.SUPPRESS, action='store_true', default=False)
@@ -1563,29 +1766,29 @@ if __name__ == '__main__':
     # Print Welcome
     print_welcome()
 
+    # Update
+    if args.update:
+        update_databases()
+        print "[+] Updated databases - you can now start creating YARA rules"
+        sys.exit(0)
+
     # Opcodes evaluation or not
     use_opcodes = False
     if args.opcodes:
         use_opcodes = True
-    if not os.path.isfile(get_abs_path("good-opcodes.db")) and use_opcodes:
-        print "[E] Please unzip the shipped good-opcodes.db database if you want to use opcodes in your rules."
-        print "[-] Deactivating opcode generation ..."
-        use_opcodes = False
-
-    if not os.path.isfile(get_abs_path("good-strings.db")) and not args.c:
-        print "[E] Please unzip the shipped good-strings.db database."
-        sys.exit(1)
 
     # Read PEStudio string list
     pestudio_strings = {}
     pestudio_available = False
-    if os.path.isfile(get_abs_path("strings.xml")) and lxml_available:
+
+    if os.path.isfile(get_abs_path(PE_STRINGS_FILE)) and lxml_available:
         print "[+] Processing PEStudio strings ..."
         pestudio_strings = initialize_pestudio_strings()
         pestudio_available = True
     else:
         if lxml_available:
-            print "\nTo improve the analysis process please download the awesome PEStudio tool by marc @ochsenmeier from http://winitor.com and place the file 'strings.xml' in the yarGen program directory.\n"
+            print "\nTo improve the analysis process please download the awesome PEStudio tool by marc @ochsenmeier " \
+                  "from http://winitor.com and place the file 'strings.xml' in the ./3rdparty directory.\n"
             time.sleep(5)
 
     # Use binarly lookup
@@ -1622,21 +1825,30 @@ if __name__ == '__main__':
         # Update existing Pickle
         if args.u:
             try:
-                print "[+] Updating database ..."
+                print "[+] Updating databases ..."
+
+                # Evaluate the database identifiers
+                db_identifier = ""
+                if args.i != "":
+                    db_identifier = "-%s" % args.i
+                strings_db = "./dbs/good-strings%s.db" % db_identifier
+                opcodes_db = "./dbs/good-opcodes%s.db" % db_identifier
 
                 # Strings -----------------------------------------------------
-                good_pickle = load(get_abs_path("good-strings.db"))
+                print "[+] Updating %s ..." % strings_db
+                good_pickle = load(get_abs_path(strings_db))
                 print "Old string database entries: %s" % len(good_pickle)
                 good_pickle.update(good_strings_db)
                 print "New string database entries: %s" % len(good_pickle)
-                save(good_pickle, "good-strings.db")
+                save(good_pickle, strings_db)
 
                 # Opcodes -----------------------------------------------------
-                good_opcode_pickle = load(get_abs_path("good-opcodes.db"))
+                print "[+] Updating %s ..." % opcodes_db
+                good_opcode_pickle = load(get_abs_path(opcodes_db))
                 print "Old opcode database entries: %s" % len(good_opcode_pickle)
                 good_opcode_pickle.update(good_opcodes_db)
                 print "New opcode database entries: %s" % len(good_opcode_pickle)
-                save(good_opcode_pickle, "good-opcodes.db")
+                save(good_opcode_pickle, opcodes_db)
 
             except Exception, e:
                 traceback.print_exc()
@@ -1644,12 +1856,23 @@ if __name__ == '__main__':
         # Create new Pickle
         if args.c:
             print "[+] Creating local database ..."
+            # Evaluate the database identifiers
+            db_identifier = ""
+            if args.i != "":
+                db_identifier = "-%s" % args.i
+            strings_db = "./dbs/good-strings%s.db" % db_identifier
+            opcodes_db = "./dbs/good-opcodes%s.db" % db_identifier
+            # Creating the databases
+            print "[+] Using '%s' as filename for newly created strings database" % strings_db
+            print "[+] Using '%s' as filename for newly created opcodes database" % opcodes_db
             try:
 
-                if os.path.isfile("good-strings.db"):
-                   os.remove("good-strings.db")
-                if os.path.isfile("good-opcodes.db"):
-                   os.remove("good-opcodes.db")
+                if os.path.isfile(strings_db):
+                    raw_input("File %s alread exists. Press enter to proceed or CTRL+C to exit." % strings_db)
+                    os.remove(strings_db)
+                if os.path.isfile(opcodes_db):
+                    raw_input("File %s alread exists. Press enter to proceed or CTRL+C to exit." % opcodes_db)
+                    os.remove(opcodes_db)
 
                 # Strings
                 good_pickle = Counter()
@@ -1659,11 +1882,12 @@ if __name__ == '__main__':
                 good_op_pickle = good_opcodes_db
 
                 # Save
-                save(good_pickle, "good-strings.db")
-                save(good_op_pickle, "good-opcodes.db")
+                save(good_pickle, strings_db)
+                save(good_op_pickle, opcodes_db)
 
-                print "New database with %s string and %s opcode entries created." % \
-                      ( len(good_strings_db), len(good_opcodes_db) )
+                print "New database with %s string and %s opcode entries created. (remember to use --opcodes to " \
+                      "extract opcodes from the samples and create the opcode databases)" % \
+                      (len(good_strings_db), len(good_opcodes_db))
             except Exception, e:
                 traceback.print_exc()
 
@@ -1671,27 +1895,58 @@ if __name__ == '__main__':
     else:
         if use_opcodes:
             print "[+] Reading goodware strings from database 'good-strings.db' and 'good-opcodes.db' ..."
-            print "    (This could take some time and uses up to 4 GB of RAM)"
+            print "    (This could take some time and uses at least 6 GB of RAM)"
         else:
             print "[+] Reading goodware strings from database 'good-strings.db' ..."
-            print "    (This could take some time and uses up to 2.5 GB of RAM)"
+            print "    (This could take some time and uses at least 3 GB of RAM)"
 
         good_strings_db = Counter()
         good_opcodes_db = Counter()
 
-        try:
-            good_pickle = load(get_abs_path("good-strings.db"))
-            good_strings_db = good_pickle
-        except Exception, e:
-            traceback.print_exc()
+        opcodes_num = 0
+        strings_num = 0
 
-        try:
-            if use_opcodes:
-                good_op_pickle = load(get_abs_path("good-opcodes.db"))
-                good_opcodes_db = good_op_pickle
-        except Exception, e:
+        # Initialize all databases
+        for file in os.listdir(get_abs_path("./dbs/")):
+            if not file.endswith(".db"):
+                continue
+            filePath = os.path.join("./dbs/", file)
+            # String databases
+            if file.startswith("good-strings"):
+                try:
+                    print "[+] Loading %s ..." % filePath
+                    good_pickle = load(get_abs_path(filePath))
+                    print "[+] Merging %s ..." % filePath
+                    good_strings_db.update(good_pickle)
+                    print "[+] Total: %s / Added %d entries" % (len(good_strings_db), len(good_strings_db) - strings_num)
+                    strings_num = len(good_strings_db)
+                except Exception, e:
+                    traceback.print_exc()
+            # Opcode databases
+            if file.startswith("good-opcodes"):
+                try:
+                    if use_opcodes:
+                        print "[+] Loading %s ..." % filePath
+                        good_op_pickle = load(get_abs_path(filePath))
+                        print "[+] Merging %s ..." % filePath
+                        good_opcodes_db.update(good_op_pickle)
+                        print "[+] Total: %s (removed duplicates) / Added %d entries" % (len(good_opcodes_db), len(good_opcodes_db) - opcodes_num)
+                        opcodes_num = len(good_opcodes_db)
+                except Exception, e:
+                    use_opcodes = False
+                    traceback.print_exc()
+
+        if use_opcodes and len(good_opcodes_db) < 1:
+            print "[E] Please download good-opcodes.db database via (--update) or get it from here " \
+                  "https://drive.google.com/drive/folders/0B2S_IOa0MiOHS0xmekR6VWRhZ28 if you want to use opcodes in your " \
+                  "rules."
+            print "[-] Deactivating opcode generation ..."
             use_opcodes = False
-            traceback.print_exc()
+
+        if len(good_strings_db) < 1 and not args.c:
+            print "[E] Please download the strings and opcodes databases (via --update or " \
+                  "URL https://drive.google.com/drive/folders/0B2S_IOa0MiOHS0xmekR6VWRhZ28 )"
+            sys.exit(1)
 
     # If malware directory given
     if args.m:
